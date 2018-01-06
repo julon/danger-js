@@ -3,6 +3,7 @@ import * as node_fetch from "node-fetch"
 
 const d = debug("danger:networking")
 declare const global: any
+
 /**
  * Adds logging to every fetch request if a global var for `verbose` is set to true
  *
@@ -10,7 +11,18 @@ declare const global: any
  * @param {fetch.RequestInit} [init] the usual options
  * @returns {Promise<fetch.Response>} network-y promise
  */
-export function api(url: string | node_fetch.Request, init: node_fetch.RequestInit): Promise<node_fetch.Response> {
+export function api(
+  url: string | node_fetch.Request,
+  init: node_fetch.RequestInit,
+  suppressErrorReporting?: boolean
+): Promise<node_fetch.Response> {
+  const isTests = typeof jest !== "undefined"
+  if (isTests && !url.toString().includes("localhost")) {
+    const message = `No API calls in tests please: ${url}`
+    debugger // tslint:disable-line
+    throw new Error(message)
+  }
+
   if (global.verbose && global.verbose === true) {
     const output = ["curl", "-i"]
 
@@ -48,10 +60,18 @@ export function api(url: string | node_fetch.Request, init: node_fetch.RequestIn
   const originalFetch: any = node_fetch
   return originalFetch(url, init).then(async (response: node_fetch.Response) => {
     // Handle failing errors
-    if (!response.ok) {
-      const responseJSON = await response.json()
-      console.warn(`Request failed [${response.status}]: ${response.url}`)
-      console.warn(`Response: ${JSON.stringify(responseJSON, null, "  ")}`)
+    if (!suppressErrorReporting && !response.ok) {
+      // we should not modify the response when an error occur to allow body stream to be read again if needed
+      let clonedResponse = response.clone()
+      console.warn(`Request failed [${clonedResponse.status}]: ${clonedResponse.url}`)
+      let responseBody = await clonedResponse.text()
+      try {
+        // tries to pretty print the JSON response when possible
+        const responseJSON = await JSON.parse(responseBody.toString())
+        console.warn(`Response: ${JSON.stringify(responseJSON, null, "  ")}`)
+      } catch (e) {
+        console.warn(`Response: ${responseBody}`)
+      }
     }
 
     return response

@@ -1,25 +1,60 @@
+#! /usr/bin/env node
+
 import * as program from "commander"
 import * as debug from "debug"
-import * as fs from "fs"
-import * as repl from "repl"
 import * as jsome from "jsome"
 
 import { FakeCI } from "../ci_source/providers/Fake"
 import { GitHub } from "../platforms/GitHub"
 import { GitHubAPI } from "../platforms/github/GitHubAPI"
-import { Executor } from "../runner/Executor"
 import { pullRequestParser } from "../platforms/github/pullRequestParser"
-import { runDangerfileEnvironment } from "../runner/DangerfileRunner"
-import { DangerContext } from "../runner/Dangerfile"
 import { dangerfilePath } from "./utils/file-utils"
+import validateDangerfileExists from "./utils/validateDangerfileExists"
+import setSharedArgs, { SharedCLI } from "./utils/sharedDangerfileArgs"
+import { jsonDSLGenerator } from "../runner/dslGenerator"
+import { prepareDangerDSL } from "./utils/runDangerSubprocess"
+import { runRunner } from "./ci/runner"
+
+// yarn build; cat source/_tests/fixtures/danger-js-pr-384.json |  node --inspect  --inspect-brk distribution/commands/danger-runner.js --text-only
 
 const d = debug("danger:pr")
+const log = console.log
+
+interface App extends SharedCLI {
+  /** Should we show the Danger Process PR JSON? */
+  json: boolean
+  js: boolean
+}
 
 program
-  .option("-v, --verbose", "Output more text to the stdout than a normal run")
-  .option("-d, --dangerfile [filePath]", "Specify custom dangerfile other than default dangerfile.js")
-  .option("-r, --repl", "Drop into a Node REPL after evaluating the dangerfile")
-  .parse(process.argv)
+  .usage("[options] <pr_url>")
+  .description("Emulate running Danger against an existing GitHub Pull Request.")
+  .option("-J, --json", "Output the raw JSON that would be passed into `danger process` for this PR.")
+  .option("-j, --js", "A more human-readable version of the JSON.")
+
+  .on("--help", () => {
+    log("\n")
+    log("  Docs:")
+    if (!process.env["DANGER_GITHUB_API_TOKEN"]) {
+      log("")
+      log("     You don't have a DANGER_GITHUB_API_TOKEN set up, this is optional, but TBH, you want to do this.")
+      log("     Check out: http://danger.systems/js/guides/the_dangerfile.html#working-on-your-dangerfile")
+      log("")
+    }
+    log("")
+    log("    -> API Reference")
+    log("       http://danger.systems/js/reference.html")
+    log("")
+    log("    -> Getting started:")
+    log("       http://danger.systems/js/guides/getting_started.html")
+    log("")
+    log("    -> The Dangerfile")
+    log("       http://danger.systems/js/guides/the_dangerfile.html")
+  })
+
+setSharedArgs(program).parse(process.argv)
+
+const app = (program as any) as App
 
 const dangerFile = dangerfilePath(program)
 
@@ -36,80 +71,46 @@ if (program.args.length === 0) {
     // TODO: Use custom `fetch` in GitHub that stores and uses local cache if PR is closed, these PRs
     //       shouldn't change often and there is a limit on API calls per hour.
 
+    const token = process.env["DANGER_GITHUB_API_TOKEN"]
+    if (!token) {
+      console.log("You don't have a DANGER_GITHUB_API_TOKEN set up, this is optional, but TBH, you want to do this")
+      console.log("Check out: http://danger.systems/js/guides/the_dangerfile.html#working-on-your-dangerfile")
+    }
+
+    console.log(`Starting Danger PR on ${pr.repo}#${pr.pullRequestNumber}`)
+
     if (validateDangerfileExists(dangerFile)) {
       d(`executing dangerfile at ${dangerFile}`)
       const source = new FakeCI({ DANGER_TEST_REPO: pr.repo, DANGER_TEST_PR: pr.pullRequestNumber })
-      const api = new GitHubAPI(source, process.env["DANGER_GITHUB_API_TOKEN"])
+      const api = new GitHubAPI(source, token)
       const platform = new GitHub(api)
-      runDanger(source, platform, dangerFile)
+      if (app.json || app.js) {
+        d("getting just the JSON/JS DSL")
+        runHalfProcessJSON(platform)
+      } else {
+        d("running process separated Danger")
+        // Always post to STDOUT in `danger-pr`
+        app.textOnly = true
+
+        // Can't send these to `danger runner`
+        delete app.js
+        delete app.json
+        runRunner(app, { source, platform })
+      }
     }
   }
 }
 
-function validateDangerfileExists(filePath: string): boolean {
-  let stat: fs.Stats | null = null
-  try {
-    stat = fs.statSync(filePath)
-  } catch (error) {
-    console.error(`Could not find a dangerfile at ${filePath}, not running against your PR.`)
-    process.exitCode = 1
+// Run the first part of a Danger Process and output the JSON to CLI
+async function runHalfProcessJSON(platform: GitHub) {
+  const dangerDSL = await jsonDSLGenerator(platform)
+  const processInput = prepareDangerDSL(dangerDSL)
+  const output = JSON.parse(processInput)
+  const dsl = { danger: output }
+  // See https://github.com/Javascipt/Jsome/issues/12
+  if (app.json) {
+    process.stdout.write(JSON.stringify(dsl, null, 2))
+  } else if (app.js) {
+    jsome(dsl)
   }
-
-  if (!!stat && !stat.isFile()) {
-    console.error(`The resource at ${filePath} appears to not be a file, not running against your PR.`)
-    process.exitCode = 1
-  }
-
-  return !!stat && stat.isFile()
-}
-
-async function runDanger(source: FakeCI, platform: GitHub, file: string) {
-  const config = {
-    stdoutOnly: program.textOnly,
-    verbose: program.verbose,
-  }
-
-  const exec = new Executor(source, platform, config)
-
-  const runtimeEnv = await exec.setupDanger()
-  const results = await runDangerfileEnvironment(file, runtimeEnv)
-  if (program["repl"]) {
-    openRepl(runtimeEnv.context)
-  } else {
-    jsome(results)
-  }
-}
-
-function openRepl(dangerContext: DangerContext): void {
-  /**
-   * Injects a read-only, global variable into the REPL
-   *
-   * @param {repl.REPLServer} repl The Node REPL created via `repl.start()`
-   * @param {string} name The name of the global variable
-   * @param {*} value The value of the global variable
-   */
-  function injectReadOnlyProperty(repl: repl.REPLServer, name: string, value: any) {
-    Object.defineProperty(repl["context"], name, {
-      configurable: false,
-      enumerable: true,
-      value,
-    })
-  }
-
-  /**
-   * Sets up the Danger REPL with `danger` and `results` global variables
-   *
-   * @param {repl.REPLServer} repl The Node REPL created via `repl.start()`
-   */
-  function setup(repl: repl.REPLServer) {
-    injectReadOnlyProperty(repl, "danger", dangerContext.danger)
-    injectReadOnlyProperty(repl, "results", dangerContext.results)
-  }
-
-  const dangerRepl = repl.start({ prompt: "> " })
-  setup(dangerRepl)
-  dangerRepl.on("exit", () => process.exit())
-  // Called when `.clear` is executed in the Node REPL
-  // This ensures that `danger` and `results` are not cleared from the REPL context
-  dangerRepl.on("reset", () => setup(dangerRepl))
 }

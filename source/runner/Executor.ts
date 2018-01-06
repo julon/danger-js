@@ -1,24 +1,29 @@
-import { contextForDanger } from "../runner/Dangerfile"
+import { contextForDanger, DangerContext } from "./Dangerfile"
 import { DangerDSL } from "../dsl/DangerDSL"
 import { CISource } from "../ci_source/ci_source"
 import { Platform } from "../platforms/platform"
 import { DangerResults } from "../dsl/DangerResults"
 import { template as githubResultsTemplate } from "./templates/githubIssueTemplate"
-import { createDangerfileRuntimeEnvironment, runDangerfileEnvironment } from "./DangerfileRunner"
-import { DangerfileRuntimeEnv } from "./types"
 import exceptionRaisedTemplate from "./templates/exceptionRaisedTemplate"
 
 import * as debug from "debug"
-import * as chalk from "chalk"
+import chalk from "chalk"
 import { sentence, href } from "./DangerUtils"
+import { DangerRunner } from "./runners/runner"
+import { jsonToDSL } from "./jsonToDSL"
+import { jsonDSLGenerator } from "./dslGenerator"
 
 // This is still badly named, maybe it really should just be runner?
 
 export interface ExecutorOptions {
   /** Should we do a text-only run? E.g. skipping comments */
   stdoutOnly: boolean
+  /** Should the output be submitted as a JSON string? */
+  jsonOnly: boolean
   /** Should Danger post as much info as possible */
   verbose: boolean
+  /** A unique ID to handle multiple Danger runs */
+  dangerID: string
 }
 
 export class Executor {
@@ -27,8 +32,11 @@ export class Executor {
   constructor(
     public readonly ciSource: CISource,
     public readonly platform: Platform,
+    public readonly runner: DangerRunner,
     public readonly options: ExecutorOptions
   ) {}
+
+  /** TODO: Next two functions aren't used in Danger, are they used in Peril? */
 
   /** Mainly just a dumb helper because I can't do
    * async functions in danger-run.js
@@ -44,10 +52,11 @@ export class Executor {
    *  Runs all of the operations for a running just Danger
    * @returns {DangerfileRuntimeEnv} A runtime environment to run Danger in
    */
-  async setupDanger(): Promise<DangerfileRuntimeEnv> {
-    const dsl = await this.dslForDanger()
-    const context = contextForDanger(dsl)
-    return await createDangerfileRuntimeEnvironment(context)
+  async setupDanger(): Promise<DangerContext> {
+    const dsl = await jsonDSLGenerator(this.platform)
+    const realDSL = await jsonToDSL(dsl)
+    const context = contextForDanger(realDSL)
+    return await this.runner.createDangerfileRuntimeEnvironment(context)
   }
 
   /**
@@ -56,13 +65,13 @@ export class Executor {
    * @returns {Promise<DangerResults>} The results of the Danger run
    */
 
-  async runDanger(file: string, runtime: DangerfileRuntimeEnv) {
+  async runDanger(file: string, runtime: DangerContext) {
     let results = {} as DangerResults
 
     // If an eval of the Dangerfile fails, we should generate a
     // message that can go back to the CI
     try {
-      results = await runDangerfileEnvironment(file, runtime)
+      results = await this.runner.runDangerfileEnvironment(file, undefined, runtime)
     } catch (error) {
       results = this.resultsForError(error)
     }
@@ -88,7 +97,8 @@ export class Executor {
    * @param {DangerResults} results a JSON representation of the end-state for a Danger run
    */
   async handleResults(results: DangerResults) {
-    if (this.options.stdoutOnly) {
+    this.d(`Got Results back, current settings`, this.options)
+    if (this.options.stdoutOnly || this.options.jsonOnly) {
       this.handleResultsPostingToSTDOUT(results)
     } else {
       this.handleResultsPostingToPlatform(results)
@@ -101,33 +111,46 @@ export class Executor {
    */
   async handleResultsPostingToSTDOUT(results: DangerResults) {
     const { fails, warnings, messages, markdowns } = results
+    if (this.options.jsonOnly) {
+      // Format for Danger Process
+      const results = {
+        fails,
+        warnings,
+        messages,
+        markdowns,
+      }
+      process.stdout.write(JSON.stringify(results, null, 2))
+    } else {
+      this.d("Writing to STDOUT:", results)
+      // Human-readable format
 
-    const table = [
-      { name: "Failures", messages: fails.map(f => f.message) },
-      { name: "Warnings", messages: warnings.map(w => w.message) },
-      { name: "Messages", messages: messages.map(m => m.message) },
-      { name: "Markdowns", messages: markdowns },
-    ]
+      const table = [
+        { name: "Failures", messages: fails.map(f => f.message) },
+        { name: "Warnings", messages: warnings.map(w => w.message) },
+        { name: "Messages", messages: messages.map(m => m.message) },
+        { name: "Markdowns", messages: markdowns },
+      ]
 
-    // Consider looking at getting the terminal width, and making it 60%
-    // if over a particular size
+      // Consider looking at getting the terminal width, and making it 60%
+      // if over a particular size
 
-    table.forEach(row => {
-      console.log(`## ${chalk.bold(row.name)}`)
-      console.log(row.messages.join(chalk.bold("\n-\n")))
-    })
+      table.forEach(row => {
+        console.log(`## ${chalk.bold(row.name)}`)
+        console.log(row.messages.join(chalk.bold("\n-\n")))
+      })
 
-    if (fails.length > 0) {
-      const s = fails.length === 1 ? "" : "s"
-      const are = fails.length === 1 ? "is" : "are"
-      const message = chalk.underline("Failing the build")
-      console.log(`${message}, there ${are} ${fails.length} fail${s}.`)
-      process.exitCode = 1
-    } else if (warnings.length > 0) {
-      const message = chalk.underline("not failing the build")
-      console.log(`Found only warnings, ${message}`)
-    } else if (messages.length > 0) {
-      console.log("Found only messages, passing those to review.")
+      if (fails.length > 0) {
+        const s = fails.length === 1 ? "" : "s"
+        const are = fails.length === 1 ? "is" : "are"
+        const message = chalk.underline("Failing the build")
+        console.log(`${message}, there ${are} ${fails.length} fail${s}.`)
+        process.exitCode = 1
+      } else if (warnings.length > 0) {
+        const message = chalk.underline("not failing the build")
+        console.log(`Found only warnings, ${message}`)
+      } else if (messages.length > 0) {
+        console.log("Found only messages, passing those to review.")
+      }
     }
   }
 
@@ -143,20 +166,26 @@ export class Executor {
     const failureCount = [...fails, ...warnings].length
     const messageCount = [...messages, ...markdowns].length
 
-    this.d(results)
+    this.d("Posting to platform:", results)
 
+    const dangerID = this.options.dangerID
     const failed = fails.length > 0
-    const successPosting = await this.platform.updateStatus(!failed, messageForResults(results))
+    const successPosting = await this.platform.updateStatus(!failed, messageForResults(results), this.ciSource.ciRunURL)
+    if (this.options.verbose) {
+      console.log("Could not add a commit status, the GitHub token for Danger does not have access rights.")
+      console.log("If the build fails, then danger will use a failing exit code.")
+    }
 
     if (failureCount + messageCount === 0) {
       console.log("No issues or messages were sent. Removing any existing messages.")
-      await this.platform.deleteMainComment()
+      await this.platform.deleteMainComment(dangerID)
     } else {
       if (fails.length > 0) {
         const s = fails.length === 1 ? "" : "s"
         const are = fails.length === 1 ? "is" : "are"
         console.log(`Failing the build, there ${are} ${fails.length} fail${s}.`)
         if (!successPosting) {
+          this.d("Failing the build due to handleResultsPostingToPlatform not successfully setting a commit status")
           process.exitCode = 1
         }
       } else if (warnings.length > 0) {
@@ -164,8 +193,8 @@ export class Executor {
       } else if (messageCount > 0) {
         console.log("Found only messages, passing those to review.")
       }
-      const comment = githubResultsTemplate(results)
-      await this.platform.updateOrCreateComment(comment)
+      const comment = githubResultsTemplate(dangerID, results)
+      await this.platform.updateOrCreateComment(dangerID, comment)
     }
 
     // More info, is more info.

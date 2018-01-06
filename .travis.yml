@@ -3,30 +3,71 @@ cache:
   yarn: true
   directories:
   - node_modules
+  - .jest/cache
 
 matrix:
   include:
-  - node_js: node
-    before_install:
-    - yarn global add greenkeeper-lockfile@1
-    before_script:
-    - greenkeeper-lockfile-update
-    - yarn run link
-    - danger run --verbose
-    after_script:
-    - greenkeeper-lockfile-upload
+  # Only normal CI test run :D
   - node_js: '6'
+  
   - node_js: '8'
+    after_script:
+    - rm -rf node_modules/@types/babel-*
+    - rm -rf node_modules/@types/babylon
+    - yarn docs
+    - yarn add dtslint@0.1.2
+    - yarn dts-lint
+
+  # Checks every example dangerfile can run in `danger runner`.
+  - node_js: '8.4'
+    script:
+     - yarn build
+     - node scripts/run-fixtures.js
+
+  # Does the real danger run
+  - node_js: node
+    script:
+    - yarn add jest
+    - yarn jest --outputFile test-results.json --json
+    - yarn run link
+    - echo "This is the real `danger ci` run on this repo"
+    - DEBUG="*" danger ci --verbose
+    - echo "Validating that danger pr works as expected"
+    - DEBUG="*" danger pr https://github.com/danger/danger-js/pull/465 --dangerfile dangerfile.circle.js --verbose 
+
+  # Create some fake projects at runtime
+  - node_js: '7'
+    script:
+      - echo "This is only for Integration tests on two blank projects"
+      - yarn build
+      - mkdir danger_blank_test
+      - cd danger_blank_test
+      - yarn init --yes
+      - yarn add file:..
+      - echo "warn('I warned you')" > dangerfile.js
+      - echo "Testing a blank Dangerfile on an empty project"
+      - DEBUG="*" yarn danger run --text-only
+      - cd ..
+      - rm -rf danger_blank_test
+
+      - npm install -g create-react-app
+      - create-react-app danger_babel_test
+      - cd danger_babel_test
+      - yarn add file:..
+      - echo "warn('Expect 2 warnings'); const a = async () => {warn('the other');}; schedule(a)" > dangerfile.js
+      - echo "Testing a blank Dangerfile on a babel CRA project"
+      - DEBUG="*" yarn danger ci --text-only
+      - cd ..
+      - rm -rf danger_babel_test
+
 
 script:
 - yarn lint
 - yarn add jest
-- yarn test -- --coverage --no-cache && rm ./coverage/coverage-final.json
-- yarn docs
-- if [[ $TRAVIS_NODE_VERSION == "8" ]]; then yarn add dtslint; yarn dts-lint; fi
+- yarn jest --runInBand
 
-after_success:
-- bash <(curl -s https://codecov.io/bash)
+notifications:
+  slack: dangergem:9FOZou9EGBV9xO1Ol4bxRPz9
 
 deploy:
   provider: npm
@@ -34,6 +75,7 @@ deploy:
   api_key:
     secure: MCHGI1GAiqyYsKaA9MGsmHOCAthURv8ECSeYSZJ5UpFng0FSslVBpNZ6xQSu3tETLHfqIb4y0PqS42xH+AsJh8j0z9B3Y9e4NvwCOnJBzw7qJNUm1RM0smYDkwqYDVlqRgjHoh3phi7zPOeEogpz0n+uEGHnpckNA1GpZvdIFef7oaEViRoDKxP0lZj5oV9Isdm7HLSYPXyCYqhgygr7qnHYyFBqd3h0Iw3w2/fg+IBet9Td8oCEpUAHe7WjeUmzgRF0FVKlC2d1kfJVYjx1qGKHh0F5Kmg1GE2xwM/QBwzBlq12XtnSLwi70MLjoUa+Y2m2T+A6vuoLb7OqwDsHp/plTfrfBD5Quqmnc5Hdh71MHWPz/OPtsyZkfLMdutvlM9BmM/7HR46+HrBMe7eNOCj79MsNCWRXdOWpEWrK7BLXtignfDFOUM+renDgBsuxvEaryQ8QxgbIudEqaJ0+kzGIpzHFQGnNXwAXZOz9Q38+CZds2J7mwz7RSTFipNqsyBFZbREmGdupyUgPalXLp0hjxu8y15atVPZAYxuLv2Wt2NXiuyf3HbO9uwwRWbat+nCThF+fmQmcgTrE4BlHvTiy4FIzve5nlBaEiWAOanIMFoSjs4Co9o16sZ0yZZS/1a2SgfLdCuFvYKmvUsqBcCcaypXBpqxvZMwTFA6oPQQ=
   on:
+    node: 6
     repo: danger/danger-js
     tags: true
     all_branches: true

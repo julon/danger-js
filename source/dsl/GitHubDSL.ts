@@ -1,12 +1,9 @@
 import { GitCommit } from "./Commit"
 import * as GitHub from "github"
 
-// This is `danger.github`
+// This is `danger.github` inside the JSON
 
-/** The GitHub metadata for your PR */
-export interface GitHubDSL {
-  /** An authenticated API so you can extend danger's behavior. An instance of the "github" npm module. */
-  api: GitHub
+export interface GitHubJSONDSL {
   /** The issue metadata for a code review session */
   issue: GitHubIssue
   /** The PR metadata for a code review session */
@@ -19,6 +16,14 @@ export interface GitHubDSL {
   reviews: GitHubReview[]
   /** The people requested to review this PR */
   requested_reviewers: GitHubUser[]
+}
+
+// This is `danger.github`
+
+/** The GitHub metadata for your PR */
+export interface GitHubDSL extends GitHubJSONDSL {
+  /** An authenticated API so you can extend danger's behavior. An instance of the "github" npm module. */
+  api: GitHub
   /** A scope for useful functions related to GitHub */
   utils: GitHubUtilsDSL
 }
@@ -37,6 +42,16 @@ export interface GitHubUtilsDSL {
    * @returns {string} A HTML string of <a>'s built as a sentence.
    */
   fileLinks(paths: string[], useBasename?: boolean, repoSlug?: string, branch?: string): string
+
+  /**
+   * Downloads a file's contents via the GitHub API. You'll want to use
+   * this instead of `fs.readFile` when aiming to support working with Peril.
+   *
+   * @param {string} path The path fo the file that exists
+   * @param {string} repoSlug An optional reference to the repo's slug: e.g. danger/danger-js
+   * @param {string} ref An optional reference to a branch/sha
+   */
+  fileContents(path: string, repoSlug?: string, ref?: string): Promise<string>
 }
 
 /**
@@ -219,6 +234,10 @@ export interface GitHubUser {
    * Whether the user is an org, or a user
    */
   type: "User" | "Organization"
+  /**
+   * The url for a users's image
+   */
+  avatar_url: string
 }
 
 /**

@@ -1,5 +1,5 @@
-import { GitHubAPI } from "../GitHubAPI"
 import { FakeCI } from "../../../ci_source/providers/Fake"
+import { GitHubAPI } from "../GitHubAPI"
 import { requestWithFixturedJSON } from "../../_tests/_github.test"
 
 const fetchJSON = (api, params): Promise<any> => {
@@ -9,6 +9,19 @@ const fetchJSON = (api, params): Promise<any> => {
         api,
         ...params,
       }),
+  })
+}
+
+const fetchText = (api, params): Promise<any> => {
+  return Promise.resolve({
+    ok: true,
+    text: () =>
+      Promise.resolve(
+        JSON.stringify({
+          api,
+          ...params,
+        })
+      ),
   })
 }
 
@@ -58,6 +71,20 @@ describe("API testing", () => {
 
     expect(api.patch).toHaveBeenCalledWith("repos/artsy/emission/issues/comments/123", {}, { body: "Hello!" })
   })
+
+  it("getPullRequestDiff", async () => {
+    api.getPullRequestInfo = await requestWithFixturedJSON("github_pr.json")
+    api.fetch = fetchText
+    let text = await api.getPullRequestDiff()
+    expect(JSON.parse(text)).toMatchObject({
+      api: "https://api.github.com/repos/artsy/emission/pulls/1",
+      headers: {
+        Authorization: "token ABCDE",
+        Accept: "application/vnd.github.v3.diff",
+        "Content-Type": "application/json",
+      },
+    })
+  })
 })
 
 describe("Peril", () => {
@@ -72,15 +99,41 @@ describe("Peril", () => {
 
   it("Allows setting additional headers", async () => {
     const request = await api.get("user")
-    expect(api.fetch).toHaveBeenCalledWith("https://api.github.com/user", {
-      body: {},
-      headers: {
-        Authorization: "token ABCDE",
-        CUSTOM: "HEADER",
-        "Content-Type": "application/json",
+    expect(api.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/user",
+      {
+        body: {},
+        headers: {
+          Authorization: "token ABCDE",
+          CUSTOM: "HEADER",
+          "Content-Type": "application/json",
+        },
+        method: "GET",
       },
-      method: "GET",
+      undefined
+    )
+  })
+
+  it("Merges two Accept headers", async () => {
+    api.additionalHeaders = { Accept: "application/vnd.github.machine-man-preview+json" }
+
+    const request = await api.get("user", {
+      Accept: "application/vnd.github.v3.diff",
     })
+
+    expect(api.fetch).toHaveBeenCalledWith(
+      "https://api.github.com/user",
+      {
+        body: {},
+        headers: {
+          Accept: "application/vnd.github.machine-man-preview+json, application/vnd.github.v3.diff",
+          Authorization: "token ABCDE",
+          "Content-Type": "application/json",
+        },
+        method: "GET",
+      },
+      undefined
+    )
   })
 
   describe("Allows setting DANGER_GITHUB_APP env variable", () => {

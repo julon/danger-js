@@ -6,27 +6,20 @@ import { ensureEnvKeysExist, ensureEnvKeysAreInt } from "../ci_source_helpers"
  *
  *  For setting up Circle CI, we recommend turning on "Only Build pull requests." in "Advanced Setting." Without this enabled,
  *  it is _really_ tricky for Danger to know whether you are in a pull request or not, as the environment metadata
- *  isn't reliable.
+ *  isn't reliable. This may be different with Circle v2.
  *
- *  With that set up, you can you add `yarn danger` to your `circle.yml`. If you override the default
+ *  With that set up, you can you add `yarn danger ci` to your `circle.yml`. If you override the default
  *  `test:` section, then add it as an extra step. Otherwise add a new `pre` section to the test:
  *
  *    ``` ruby
  *    test:
  *      override:
- *          - yarn danger
+ *          - yarn danger ci
  *    ```
  *
  *  ### Token Setup
  *
  *  There is no difference here for OSS vs Closed, add your `DANGER_GITHUB_API_TOKEN` to the Environment variable settings page.
- *
- *  ### I still want to run commit builds
- *
- *  OK, alright. So, if you add a `DANGER_CIRCLE_CI_API_TOKEN` then Danger will use the Circle API to look up
- *  the status of whether a commit is inside a PR or not. You can generate a token from inside the project set_trace_func
- *  then go to Permissions > "API Permissions" and generate a token with access to Status. Take that token and add
- *  it to Build Settings > "Environment Variables".
  *
  */
 export class Circle implements CISource {
@@ -41,7 +34,7 @@ export class Circle implements CISource {
   }
 
   get isPR(): boolean {
-    if (ensureEnvKeysExist(this.env, ["CI_PULL_REQUEST"])) {
+    if (ensureEnvKeysExist(this.env, ["CI_PULL_REQUEST"]) || ensureEnvKeysExist(this.env, ["CIRCLE_PULL_REQUEST"])) {
       return true
     }
 
@@ -50,7 +43,7 @@ export class Circle implements CISource {
   }
 
   private _prParseURL(): { owner?: string; reponame?: string; id?: string } {
-    const prUrl = this.env.CI_PULL_REQUEST || ""
+    const prUrl = this.env.CI_PULL_REQUEST || this.env.CIRCLE_PULL_REQUEST || ""
     const splitSlug = prUrl.split("/")
     if (splitSlug.length === 7) {
       const owner = splitSlug[3]
@@ -78,7 +71,12 @@ export class Circle implements CISource {
   get repoURL(): string {
     return this.env.CIRCLE_REPOSITORY_URL
   }
+
   get supportedPlatforms(): string[] {
     return ["github"]
+  }
+
+  get ciRunURL() {
+    return this.env["CIRCLE_BUILD_URL"]
   }
 }

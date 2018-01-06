@@ -1,4 +1,4 @@
-import { GitHub } from "../../GitHub"
+import { GitHub, githubJSONToGitHubDSL } from "../../GitHub"
 import { GitHubAPI } from "../GitHubAPI"
 
 import { GitCommit } from "../../../dsl/Commit"
@@ -6,16 +6,27 @@ import { FakeCI } from "../../../ci_source/providers/Fake"
 import { readFileSync } from "fs"
 import { resolve, join as pathJoin } from "path"
 import { EOL } from "os"
+import { gitJSONToGitDSL } from "../GitHubGit"
+
+import * as NodeGitHub from "github"
+import { GitHubDSL } from "../../../dsl/GitHubDSL"
+import { GitDSL } from "../../../dsl/GitDSL"
 
 const fixtures = resolve(__dirname, "..", "..", "_tests", "fixtures")
 
+/** Returns a fixture. */
+const loadFixture = (path: string): string =>
+  readFileSync(pathJoin(fixtures, path), {})
+    .toString()
+    .replace(/\r/g, "")
+
 /** Returns JSON from the fixtured dir */
 export const requestWithFixturedJSON = async (path: string): Promise<() => Promise<any>> => () =>
-  Promise.resolve(JSON.parse(readFileSync(pathJoin(fixtures, path), {}).toString()))
+  Promise.resolve(JSON.parse(loadFixture(path)))
 
 /** Returns arbitrary text value from a request */
 export const requestWithFixturedContent = async (path: string): Promise<() => Promise<string>> => () =>
-  Promise.resolve(readFileSync(pathJoin(fixtures, path), {}).toString())
+  Promise.resolve(loadFixture(path))
 
 /**
  * HACKish: Jest on Windows seems to include some additional
@@ -31,20 +42,39 @@ const masterSHA = JSON.parse(readFileSync(pathJoin(fixtures, pullRequestInfoFile
 
 describe("the dangerfile gitDSL", async () => {
   let github: GitHub = {} as any
+  let nodeGitHubAPI: NodeGitHub = {} as any
+
+  let githubDSL: GitHubDSL = {} as any
+  let gitDSL: GitDSL = {} as any
+
   beforeEach(async () => {
     const api = new GitHubAPI(new FakeCI({}))
     github = new GitHub(api)
 
+    // Unused, but needed for DSL generation
+    api.getIssue = () => Promise.resolve({})
+    api.getReviews = () => Promise.resolve({})
+    api.getReviewerRequests = () => Promise.resolve({})
+
+    // Actually used
     api.getPullRequestInfo = await requestWithFixturedJSON(pullRequestInfoFilename)
     api.getPullRequestDiff = await requestWithFixturedContent("github_diff.diff")
     api.getPullRequestCommits = await requestWithFixturedJSON("github_commits.json")
-    api.getFileContents = async (path, repoSlug, ref) => (await requestWithFixturedJSON(`static_file:${ref}.json`))()
+    api.getFileContents = async (path, repoSlug, ref) => (await requestWithFixturedJSON(`static_file.${ref}.json`))()
+
+    //
+    nodeGitHubAPI = new NodeGitHub()
+    nodeGitHubAPI.repos.getContent = async ({ ref }) => (await requestWithFixturedJSON(`static_file.${ref}.json`))()
+
+    const gitJSONDSL = await github.getPlatformGitRepresentation()
+    const githubJSONDSL = await github.getPlatformDSLRepresentation()
+    githubDSL = githubJSONToGitHubDSL(githubJSONDSL, nodeGitHubAPI)
+    gitDSL = gitJSONToGitDSL(githubDSL, gitJSONDSL, github.api)
   })
 
   it("sets the modified/created/deleted", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
-
-    expect(gitDSL.modified_files).toEqual([
+    const gitJSONDSL = await github.getPlatformGitRepresentation()
+    expect(gitJSONDSL.modified_files).toEqual([
       "CHANGELOG.md",
       "data/schema.graphql",
       "data/schema.json",
@@ -56,59 +86,53 @@ describe("the dangerfile gitDSL", async () => {
       "lib/containers/__tests__/gene-tests.js",
       "lib/containers/gene.js",
       "tsconfig.json",
-    ]) //tslint:disable-line:max-line-length
+    ])
 
-    expect(gitDSL.created_files).toEqual([
+    expect(gitJSONDSL.created_files).toEqual([
       "lib/components/gene/about.js",
       "lib/components/gene/biography.js",
       "lib/components/related_artists/index.js",
       "lib/components/related_artists/related_artist.js",
-    ]) //tslint:disable-line:max-line-length
+    ])
 
-    expect(gitDSL.deleted_files).toEqual([
+    expect(gitJSONDSL.deleted_files).toEqual([
       "lib/components/artist/related_artists/index.js",
       "lib/components/artist/related_artists/related_artist.js",
       "lib/components/gene/about_gene.js",
-    ]) //tslint:disable-line:max-line-length
+    ])
   })
 
   it("shows the diff for a specific file", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const { diff } = await gitDSL.diffForFile("tsconfig.json")
 
     expect(stripWhitespaceForSnapshot(diff)).toMatchSnapshot()
   })
 
   it("should include `before` text content of the file", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const { before } = await gitDSL.diffForFile("tsconfig.json")
 
     expect(stripWhitespaceForSnapshot(before)).toMatchSnapshot()
   })
 
   it("should include `after` text content of the file", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const { after } = await gitDSL.diffForFile("tsconfig.json")
 
     expect(stripWhitespaceForSnapshot(after)).toMatchSnapshot()
   })
 
   it("should include `added` text content of the file", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const { added } = await gitDSL.diffForFile("tsconfig.json")
 
     expect(stripWhitespaceForSnapshot(added)).toMatchSnapshot()
   })
 
   it("should include `removed` text content of the file", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const { removed } = await gitDSL.diffForFile("tsconfig.json")
 
     expect(stripWhitespaceForSnapshot(removed)).toMatchSnapshot()
   })
 
   it("resolves to `null` for files not in modified_files", async () => {
-    const gitDSL = await github.getPlatformGitRepresentation()
     const result = await gitDSL.diffForFile("fuhqmahgads.json")
 
     expect(result).toBeNull()
@@ -135,15 +159,63 @@ describe("the dangerfile gitDSL", async () => {
       },
       url: "https://api.github.com/repos/artsy/emission/commits/13da2c844def1f4262ee440bd86fb2a3b021718b",
     }
-    const gitDSL = await github.getPlatformGitRepresentation()
+
     expect(gitDSL.commits[0]).toEqual(exampleCommit)
   })
 
   describe("JSONPatchForFile", () => {
-    it("returns a null for files not in the modified_files", async () => {
-      const gitDSL = await github.getPlatformGitRepresentation()
+    it("returns a null for files not in the change list", async () => {
       const empty = await gitDSL.JSONPatchForFile("fuhqmahgads.json")
       expect(empty).toEqual(null)
+    })
+
+    it("handles showing a patch for a created file", async () => {
+      const before = ""
+
+      const after = {
+        a: "o, world",
+        b: 3,
+        c: ["one", "two", "three", "four"],
+      }
+
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        const obj = ref === masterSHA ? before : after
+        return obj === "" ? "" : JSON.stringify(obj)
+      }
+
+      const empty = await gitDSL.JSONPatchForFile("data/schema.json")
+
+      expect(empty).toEqual({
+        before: null,
+        after: after,
+        diff: [
+          { op: "add", path: "/a", value: "o, world" },
+          { op: "add", path: "/b", value: 3 },
+          { op: "add", path: "/c", value: ["one", "two", "three", "four"] },
+        ],
+      })
+    })
+
+    it("handles showing a patch for a deleted file", async () => {
+      const before = {
+        a: "o, world",
+        b: 3,
+        c: ["one", "two", "three", "four"],
+      }
+
+      const after = ""
+
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        const obj = ref === masterSHA ? before : after
+        return obj === "" ? "" : JSON.stringify(obj)
+      }
+
+      const empty = await gitDSL.JSONPatchForFile("data/schema.json")
+      expect(empty).toEqual({
+        before: before,
+        after: null,
+        diff: [{ op: "remove", path: "/a" }, { op: "remove", path: "/b" }, { op: "remove", path: "/c" }],
+      })
     })
 
     it("handles showing a patch for two different diff files", async () => {
@@ -159,13 +231,13 @@ describe("the dangerfile gitDSL", async () => {
         c: ["one", "two", "three", "four"],
       }
 
-      github.api.fileContents = async (path, repo, ref) => {
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
         const obj = ref === masterSHA ? before : after
         return JSON.stringify(obj)
       }
 
-      const gitDSL = await github.getPlatformGitRepresentation()
       const empty = await gitDSL.JSONPatchForFile("data/schema.json")
+
       expect(empty).toEqual({
         before,
         after,
@@ -179,14 +251,73 @@ describe("the dangerfile gitDSL", async () => {
   })
 
   describe("JSONDiffForFile", () => {
-    it("returns an empty object for files not in the modified_files", async () => {
-      const gitDSL = await github.getPlatformGitRepresentation()
+    it("returns an empty object for files not in the change list", async () => {
       const empty = await gitDSL.JSONDiffForFile("fuhqmahgads.json")
       expect(empty).toEqual({})
     })
 
+    it("handles showing a patch for a created file", async () => {
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        const after = {
+          a: "o, world",
+          b: 3,
+          c: ["one", "two", "three", "four"],
+          d: ["one", "two"],
+          e: ["five", "one", "three"],
+        }
+
+        const obj = ref === masterSHA ? {} : after
+        return JSON.stringify(obj)
+      }
+
+      const empty = await gitDSL.JSONDiffForFile("data/schema.json")
+
+      expect(empty).toEqual({
+        a: { after: "o, world", before: null },
+        b: { after: 3, before: null },
+        c: {
+          added: ["one", "two", "three", "four"],
+          after: ["one", "two", "three", "four"],
+          before: null,
+          removed: [],
+        },
+        d: { added: ["one", "two"], after: ["one", "two"], before: null, removed: [] },
+        e: { added: ["five", "one", "three"], after: ["five", "one", "three"], before: null, removed: [] },
+      })
+    })
+
+    it("handles showing a patch for a deleted file", async () => {
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        const before = {
+          a: "o, world",
+          b: 3,
+          c: ["one", "two", "three", "four"],
+          d: ["one", "two"],
+          e: ["five", "one", "three"],
+        }
+
+        const obj = ref === masterSHA ? before : {}
+        return JSON.stringify(obj)
+      }
+
+      const empty = await gitDSL.JSONDiffForFile("data/schema.json")
+
+      expect(empty).toEqual({
+        a: { after: null, before: "o, world" },
+        b: { after: null, before: 3 },
+        c: {
+          added: [],
+          after: null,
+          before: ["one", "two", "three", "four"],
+          removed: ["one", "two", "three", "four"],
+        },
+        d: { added: [], after: null, before: ["one", "two"], removed: ["one", "two"] },
+        e: { added: [], after: null, before: ["five", "one", "three"], removed: ["five", "one", "three"] },
+      })
+    })
+
     it("handles showing a patch for two different diff files", async () => {
-      github.api.fileContents = async (path, repo, ref) => {
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
         const before = {
           a: "Hello, world",
           b: 1,
@@ -206,8 +337,9 @@ describe("the dangerfile gitDSL", async () => {
         const obj = ref === masterSHA ? before : after
         return JSON.stringify(obj)
       }
-      const gitDSL = await github.getPlatformGitRepresentation()
+
       const empty = await gitDSL.JSONDiffForFile("data/schema.json")
+
       expect(empty).toEqual({
         a: { after: "o, world", before: "Hello, world" },
         b: { after: 3, before: 1 },
@@ -218,7 +350,7 @@ describe("the dangerfile gitDSL", async () => {
     })
 
     it("handles a package.json change elegantly", async () => {
-      github.api.fileContents = async (path, repo, ref) => {
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
         const before = {
           dependencies: {
             "babel-polyfill": "^6.20.0",
@@ -251,8 +383,9 @@ describe("the dangerfile gitDSL", async () => {
         const obj = ref === masterSHA ? before : after
         return JSON.stringify(obj)
       }
-      const gitDSL = await github.getPlatformGitRepresentation()
+
       const empty = await gitDSL.JSONDiffForFile("data/schema.json")
+
       expect(empty).toEqual({
         dependencies: {
           added: [],
@@ -276,6 +409,81 @@ describe("the dangerfile gitDSL", async () => {
           removed: [],
         },
       })
+    })
+  })
+
+  describe("textDiffForFile", () => {
+    it("returns a null for files not in the change list", async () => {
+      const empty = await gitDSL.diffForFile("fuhqmahgads.json")
+      expect(empty).toEqual(null)
+    })
+
+    it("returns a diff for created files", async () => {
+      const before = ""
+      const after =
+        "/* @flow */\n" +
+        "'use strict'\n" +
+        "import Relay from 'react-relay'\n" +
+        "import React from 'react'\n" +
+        "import { View, StyleSheet } from 'react-native'\n" +
+        "import Biography from './biography'\n" +
+        "import RelatedArtists from '../related_artists'\n" +
+        "import Separator from '../separator'\n" +
+        "class About extends React.Component\n"
+
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        return ref === masterSHA ? before : after
+      }
+
+      const diff = await gitDSL.diffForFile("lib/components/gene/about.js")
+
+      expect(diff.before).toEqual("")
+      expect(diff.after).toMatch(/class About extends React.Component/)
+      expect(diff.diff).toMatch(/class About extends React.Component/)
+    })
+
+    it("returns a diff for deleted files", async () => {
+      const before =
+        "'use strict'\n" +
+        "import Relay from 'react-relay'\n" +
+        "import React from 'react'\n" +
+        "import { StyleSheet, View, Dimensions } from 'react-native'\n\n" +
+        "class RelatedArtists extends React.Component"
+
+      const after = ""
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        return ref === masterSHA ? before : after
+      }
+
+      const diff = await gitDSL.diffForFile("lib/components/artist/related_artists/index.js")
+
+      expect(diff.before).toMatch(/class RelatedArtists extends React.Component/)
+      expect(diff.after).toEqual("")
+      expect(diff.diff).toMatch(/class RelatedArtists extends React.Component/)
+    })
+
+    it("returns a diff for modified files", async () => {
+      const before =
+        `- [dev] Updates Flow to 0.32 - orta\n` +
+        `- [dev] Updates React to 0.34 - orta\n` +
+        `- [dev] Turns on "keychain sharing" to fix a keychain bug in sim - orta`
+
+      const after = `- [dev] Updates Flow to 0.32 - orta
+        - [dev] Updates React to 0.34 - orta
+        - [dev] Turns on "keychain sharing" to fix a keychain bug in sim - orta
+        - GeneVC now shows about information, and trending artists - orta`
+
+      githubDSL.utils.fileContents = async (path, repo, ref) => {
+        return ref === masterSHA ? before : after
+      }
+
+      const diff = await gitDSL.diffForFile("CHANGELOG.md")
+
+      expect(diff.before).toEqual(before)
+      expect(diff.after).toEqual(after)
+      expect(diff.added).toEqual("+- GeneVC now shows about information, and trending artists - orta")
+      expect(diff.removed).toEqual("")
+      expect(diff.diff).toMatch(/GeneVC now shows about information, and trending artists/)
     })
   })
 })

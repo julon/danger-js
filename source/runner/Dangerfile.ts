@@ -4,6 +4,16 @@ import { MarkdownString } from "../dsl/Aliases"
 
 /// Start of Danger DSL definition
 
+/** A function with a callback function, which Danger wraps in a Promise */
+export type CallbackableFn = (callback: (done: any) => void) => void
+
+/**
+ * Types of things which Danger will schedule for you, it's recommended that you
+ * just throw in an `async () => { [...] }` function. Can also handle a function
+ * that has a single 'done' arg.
+ */
+export type Scheduleable = Promise<any> | Promise<void> | CallbackableFn
+
 export interface DangerContext {
   /**
    * A Dangerfile is evaluated as a script, and so async code does not work
@@ -14,7 +24,7 @@ export interface DangerContext {
    *
    * @param {Function} asyncFunction the function to run asynchronously
    */
-  schedule(asyncFunction: (p: Promise<any>) => void): void
+  schedule(asyncFunction: Scheduleable): void
 
   /**
    * Fails a build, outputting a specific reason for failing.
@@ -45,9 +55,6 @@ export interface DangerContext {
    */
   markdown(message: MarkdownString): void
 
-  /** Typical console */
-  console: Console
-
   /**
    * The root Danger object. This contains all of the metadata you
    * will be looking for in order to generate useful rules.
@@ -77,44 +84,19 @@ export function contextForDanger(dsl: DangerDSLType): DangerContext {
     scheduled: [],
   }
 
-  const schedule = (fn: Function) => results.scheduled.push(fn)
+  const schedule = (fn: any) => results.scheduled && results.scheduled.push(fn)
   const fail = (message: MarkdownString) => results.fails.push({ message })
   const warn = (message: MarkdownString) => results.warnings.push({ message })
   const message = (message: MarkdownString) => results.messages.push({ message })
   const markdown = (message: MarkdownString) => results.markdowns.push(message)
 
-  // Anything _but_ danger, that is on the root-level DSL
-  const globals = {
+  return {
     schedule,
     fail,
     warn,
     message,
     markdown,
-    console,
     results,
-  }
-
-  // OK, so this is a bit weird, but hear me out.
-  //
-  // I am not sure if it makes sense for "danger js plugins" ( which will
-  // be normal npm modules) to work with the magic globals available in the runtime.
-  //
-  // So I'm _probably_ going to advocate that you pass in the `danger` object into
-  // functions for danger plugins. This means that they can use `danger.fail` etc. This
-  // should make it significantly easier to build and make tests for your modules.
-  //
-  // Which should mean we get more plugins overall.
-  //
-  // Which should be cool.
-  //
-  // So, I'm not going to expose these on the interfaces (and thus the public reference
-  // but it will go into a 'plugin authors guide' whatever that looks like.)
-  //
-  return {
-    ...globals,
-    danger: {
-      ...dsl,
-      ...globals,
-    },
+    danger: dsl,
   }
 }

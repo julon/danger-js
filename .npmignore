@@ -9,8 +9,8 @@ docs
 .editorconfig
 .babelrc
 scripts
-dangerfile.js
+dangerfile.ts
 env
-.eslintrc.json
 jsconfig.json
 coverage
+.jest

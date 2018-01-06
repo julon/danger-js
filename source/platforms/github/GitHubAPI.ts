@@ -1,12 +1,14 @@
-import { api as fetch } from "../../api/fetch"
-import { RepoMetaData } from "../../ci_source/ci_source"
-import { GitHubPRDSL, GitHubUser } from "../../dsl/GitHubDSL"
-import * as find from "lodash.find"
+import * as GitHubNodeAPI from "github"
+import * as debug from "debug"
+import * as node_fetch from "node-fetch"
+import * as parse from "parse-link-header"
 import * as v from "voca"
 
-import * as node_fetch from "node-fetch"
-import * as GitHubNodeAPI from "github"
-import { dangerSignaturePostfix } from "../../runner/templates/githubIssueTemplate"
+import { GitHubPRDSL, GitHubUser } from "../../dsl/GitHubDSL"
+
+import { RepoMetaData } from "../../ci_source/ci_source"
+import { dangerSignaturePostfix, dangerIDToString } from "../../runner/templates/githubIssueTemplate"
+import { api as fetch } from "../../api/fetch"
 
 // The Handle the API specific parts of the github
 
@@ -20,6 +22,7 @@ export type APIToken = string
 export class GitHubAPI {
   fetch: typeof fetch
   additionalHeaders: any
+  private readonly d = debug("danger:GitHubAPI")
 
   constructor(public readonly repoMetadata: RepoMetaData, public readonly token?: APIToken) {
     // This allows Peril to DI in a new Fetch function
@@ -34,7 +37,7 @@ export class GitHubAPI {
    * but for now that's just a refactor someone can try.
    */
   getExternalAPI(): GitHubNodeAPI {
-    const baseUrl = process.env["DANGER_GITHUB_API_BASE_URL"] || null
+    const baseUrl = process.env["DANGER_GITHUB_API_BASE_URL"] || undefined
     const api = new GitHubNodeAPI({
       host: baseUrl,
       headers: {
@@ -71,14 +74,16 @@ export class GitHubAPI {
 
   // The above is the API for Platform
 
-  async getDangerCommentID(): Promise<number | null> {
+  async getDangerCommentIDs(dangerID: string): Promise<number[]> {
     const userID = await this.getUserID()
     const allComments: any[] = await this.getPullRequestComments()
-    const dangerComment = find(
-      allComments,
-      (comment: any) => (!userID || comment.user.id === userID) && v.includes(comment.body, dangerSignaturePostfix)
-    )
-    return dangerComment ? dangerComment.id : null
+    const dangerIDMessage = dangerIDToString(dangerID)
+
+    return allComments
+      .filter(comment => v.includes(comment.body, dangerIDMessage))
+      .filter(comment => userID || comment.user.id === userID)
+      .filter(comment => v.includes(comment.body, dangerSignaturePostfix))
+      .map(comment => comment.id)
   }
 
   async updateCommentWithID(id: number, comment: string): Promise<any> {
@@ -129,15 +134,64 @@ export class GitHubAPI {
     const prID = this.repoMetadata.pullRequestID
     const res = await this.get(`repos/${repo}/pulls/${prID}`)
 
-    return res.ok ? res.json() as Promise<GitHubPRDSL> : {} as GitHubPRDSL
+    return res.ok ? (res.json() as Promise<GitHubPRDSL>) : ({} as GitHubPRDSL)
   }
 
+  /**
+   * Get list of commits in pull requests. This'll try to iterate all available pages
+   * Until it reaches hard limit of api itself (250 commits).
+   * https://developer.github.com/v3/pulls/#list-commits-on-a-pull-request
+   *
+   */
   async getPullRequestCommits(): Promise<any> {
     const repo = this.repoMetadata.repoSlug
     const prID = this.repoMetadata.pullRequestID
-    const res = await this.get(`repos/${repo}/pulls/${prID}/commits`)
 
-    return res.ok ? res.json() : []
+    const ret: Array<any> = []
+
+    /**
+     * Read response header and locate next page for pagination via link header.
+     * If not found, will return -1.
+     *
+     * @param response Github API response sent via node-fetch
+     */
+    const getNextPageFromLinkHeader = (response: node_fetch.Response): number => {
+      const linkHeader = response.headers.get("link")
+      if (!linkHeader) {
+        this.d(`getNextPageFromLinkHeader:: Given response does not contain link header for pagination`)
+        return -1
+      }
+
+      const parsedHeader = parse(linkHeader)
+      this.d(`getNextPageFromLinkHeader:: Link header found`, parsedHeader)
+      if (!!parsedHeader.next && !!parsedHeader.next.page) {
+        return parsedHeader.next.page
+      }
+      return -1
+    }
+
+    //iterates commit request pages until next page's not available, or response failed for some reason.
+    let page = 0
+    while (page >= 0) {
+      const requestUrl = `repos/${repo}/pulls/${prID}/commits${page > 0 ? `?page=${page}` : ""}`
+      this.d(`getPullRequestCommits:: Sending pull request commit request for ${page === 0 ? "first" : `${page}`} page`)
+      this.d(`getPullRequestCommits:: Request url generated "${requestUrl}"`)
+
+      const response = await this.get(requestUrl)
+      if (response.ok) {
+        ret.push(...(await response.json()))
+        page = getNextPageFromLinkHeader(response)
+      } else {
+        this.d(
+          `getPullRequestCommits:: Failed to get response while traverse page ${page} with ${
+            response.status
+          }, bailing rest of pages if exists`
+        )
+        page = -1
+      }
+    }
+
+    return ret
   }
 
   async getUserInfo(): Promise<GitHubUser> {
@@ -159,9 +213,8 @@ export class GitHubAPI {
     const repo = this.repoMetadata.repoSlug
     const prID = this.repoMetadata.pullRequestID
     const res = await this.get(`repos/${repo}/pulls/${prID}`, {
-      accept: "application/vnd.github.v3.diff",
+      Accept: "application/vnd.github.v3.diff",
     })
-
     return res.ok ? res.text() : ""
   }
 
@@ -174,14 +227,14 @@ export class GitHubAPI {
     const repo = this.repoMetadata.repoSlug
     const res = await this.get(`repos/${repo}/pulls`)
 
-    return res.ok ? res.json : []
+    return res.ok ? res.json() : []
   }
 
   async getReviewerRequests(): Promise<any> {
     const repo = this.repoMetadata.repoSlug
     const prID = this.repoMetadata.pullRequestID
     const res = await this.get(`repos/${repo}/pulls/${prID}/requested_reviewers`, {
-      accept: "application/vnd.github.black-cat-preview+json",
+      Accept: "application/vnd.github.black-cat-preview+json",
     })
 
     return res.ok ? res.json() : []
@@ -191,7 +244,7 @@ export class GitHubAPI {
     const repo = this.repoMetadata.repoSlug
     const prID = this.repoMetadata.pullRequestID
     const res = await this.get(`repos/${repo}/pulls/${prID}/reviews`, {
-      accept: "application/vnd.github.black-cat-preview+json",
+      Accept: "application/vnd.github.black-cat-preview+json",
     })
 
     return res.ok ? res.json() : []
@@ -205,7 +258,7 @@ export class GitHubAPI {
     return res.ok ? res.json() : { labels: [] }
   }
 
-  async updateStatus(passed: boolean, message: string): Promise<any> {
+  async updateStatus(passed: boolean, message: string, url?: string): Promise<any> {
     const repo = this.repoMetadata.repoSlug
 
     const prJSON = await this.getPullRequestInfo()
@@ -215,8 +268,8 @@ export class GitHubAPI {
       {},
       {
         state: passed ? "success" : "failure",
-        context: "Danger",
-        target_url: "http://danger.systems/js",
+        context: process.env["PERIL_INTEGRATION_ID"] ? "Peril" : "Danger",
+        target_url: url || "http://danger.systems/js",
         description: message,
       }
     )
@@ -226,29 +279,43 @@ export class GitHubAPI {
 
   // API Helpers
 
-  private api(path: string, headers: any = {}, body: any = {}, method: string) {
+  private api(path: string, headers: any = {}, body: any = {}, method: string, suppressErrors?: boolean) {
     if (this.token) {
       headers["Authorization"] = `token ${this.token}`
     }
 
+    const containsBase = path.startsWith("http")
     const baseUrl = process.env["DANGER_GITHUB_API_BASE_URL"] || "https://api.github.com"
-    return this.fetch(`${baseUrl}/${path}`, {
-      method: method,
-      body: body,
-      headers: {
-        "Content-Type": "application/json",
-        ...headers,
-        ...this.additionalHeaders,
+    const url = containsBase ? path : `${baseUrl}/${path}`
+
+    let customAccept = {}
+    if (headers.Accept && this.additionalHeaders.Accept) {
+      // We need to merge the accepts which are comma separated according to the HTML spec
+      // e.g. https://gist.github.com/LTe/5270348
+      customAccept = { Accept: `${this.additionalHeaders.Accept}, ${headers.Accept}` }
+    }
+    return this.fetch(
+      url,
+      {
+        method: method,
+        body: body,
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+          ...this.additionalHeaders,
+          ...customAccept,
+        },
       },
-    })
+      suppressErrors
+    )
   }
 
   get(path: string, headers: any = {}, body: any = {}): Promise<node_fetch.Response> {
     return this.api(path, headers, body, "GET")
   }
 
-  post(path: string, headers: any = {}, body: any = {}): Promise<node_fetch.Response> {
-    return this.api(path, headers, JSON.stringify(body), "POST")
+  post(path: string, headers: any = {}, body: any = {}, suppressErrors?: boolean): Promise<node_fetch.Response> {
+    return this.api(path, headers, JSON.stringify(body), "POST", suppressErrors)
   }
 
   patch(path: string, headers: any = {}, body: any = {}): Promise<node_fetch.Response> {

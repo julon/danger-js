@@ -1,6 +1,8 @@
 import { Env, CISource } from "../ci_source"
 import { ensureEnvKeysExist, getPullRequestIDForBranch } from "../ci_source_helpers"
 
+// https://documentation.codeship.com/pro/builds-and-configuration/environment-variables/
+
 /**
  * ### CI Setup
  *
@@ -11,10 +13,10 @@ import { ensureEnvKeysExist, getPullRequestIDForBranch } from "../ci_source_help
  *   ...
  *    - name: danger
  *      service: web
- *      command: yarn danger
+ *      command: yarn danger ci
  * ```
  *
- * If you're using Codeship Classic, add `yarn danger` to your 'Test Commands'
+ * If you're using Codeship Classic, add `yarn danger ci` to your 'Test Commands'
  *
  * ### Token Setup
  *

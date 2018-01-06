@@ -35,6 +35,49 @@ declare module "danger" {
     date: string
   }
   /**
+   * The shape of the JSON passed between Danger and a subprocess. It's built
+   * to be expanded in the future.
+   */
+  interface DangerJSON {
+    danger: DangerDSLJSONType
+  }
+
+  /**
+   *  The root of the Danger JSON DSL.
+   */
+
+  interface DangerDSLJSONType {
+    /** The data only version of Git DSL */
+    git: GitJSONDSL
+    /** The data only version of GitHub DSL */
+    github: GitHubDSL
+    /**
+     * Used in the Danger JSON DSL to pass metadata between
+     * processes. It will be undefined when used inside the Danger DSL
+     */
+    settings: {
+      /**
+       * Saves each client re-implmenting logic to grab these vars
+       * for their API clients
+       */
+      github: {
+        /** API token for the GitHub client to use */
+        accessToken: string
+        /** Optional URL for enterprise GitHub */
+        baseURL: string | undefined
+        /** Optional headers to add to a request */
+        additionalHeaders: any
+      }
+      /**
+       * This is still a bit of a WIP, but this should
+       * pass args/opts from the original CLI call through
+       * to the process.
+       */
+      cliArgs: any
+    }
+  }
+
+  /**
    *  The Danger DSL provides the metadata for introspection
    *  in order to create your own rules.
    */
@@ -57,7 +100,7 @@ declare module "danger" {
     readonly github: GitHubDSL
 
     /**
-     * Functions which are gloablly useful in most Dangerfiles. Right
+     * Functions which are globally useful in most Dangerfiles. Right
      * now, these functions are around making sentences of arrays, or
      * for making hrefs easily.
      */
@@ -95,7 +138,7 @@ declare module "danger" {
     /**
      * Asynchronous functions to be run after parsing
      */
-    scheduled: any[]
+    scheduled?: any[]
   }
 
   /**
@@ -167,7 +210,7 @@ declare module "danger" {
     after: any
     /** If both before & after are arrays, then you optionally get what is added. Empty if no additional objects. */
     added?: any[]
-    /** If both before & after are arrays, then you optionally get what is removed. Empty ig no removed objects. */
+    /** If both before & after are arrays, then you optionally get what is removed. Empty if no removed objects. */
     removed?: any[]
   }
 
@@ -178,8 +221,14 @@ declare module "danger" {
 
   // This is `danger.git`
 
-  /** The git specific metadata for a PR */
-  interface GitDSL {
+  /**
+   *
+   * The Git Related Metadata which is available inside the Danger DSL JSON
+   *
+   * @namespace JSONDSL
+   */
+
+  interface GitJSONDSL {
     /**
      * Filepaths with changes relative to the git root
      */
@@ -195,7 +244,14 @@ declare module "danger" {
      */
     readonly deleted_files: string[]
 
-    /** Offers the diff for a specific file
+    /** The Git commit metadata */
+    readonly commits: GitCommit[]
+  }
+
+  /** The git specific metadata for a PR */
+  interface GitDSL extends GitJSONDSL {
+    /**
+     * Offers the diff for a specific file
      *
      * @param {string} filename the path to the json file
      */
@@ -230,16 +286,10 @@ declare module "danger" {
      * @param {string} filename the path to the json file
      */
     JSONDiffForFile(filename: string): Promise<JSONDiff>
-
-    /** The Git commit metadata */
-    readonly commits: GitCommit[]
   }
-  // This is `danger.github`
+  // This is `danger.github` inside the JSON
 
-  /** The GitHub metadata for your PR */
-  interface GitHubDSL {
-    /** An authenticated API so you can extend danger's behavior. An instance of the "github" npm module. */
-    api: GitHub
+  interface GitHubJSONDSL {
     /** The issue metadata for a code review session */
     issue: GitHubIssue
     /** The PR metadata for a code review session */
@@ -252,6 +302,14 @@ declare module "danger" {
     reviews: GitHubReview[]
     /** The people requested to review this PR */
     requested_reviewers: GitHubUser[]
+  }
+
+  // This is `danger.github`
+
+  /** The GitHub metadata for your PR */
+  interface GitHubDSL extends GitHubJSONDSL {
+    /** An authenticated API so you can extend danger's behavior. An instance of the "github" npm module. */
+    api: GitHub
     /** A scope for useful functions related to GitHub */
     utils: GitHubUtilsDSL
   }
@@ -270,6 +328,16 @@ declare module "danger" {
      * @returns {string} A HTML string of <a>'s built as a sentence.
      */
     fileLinks(paths: string[], useBasename?: boolean, repoSlug?: string, branch?: string): string
+
+    /**
+     * Downloads a file's contents via the GitHub API. You'll want to use
+     * this instead of `fs.readFile` when aiming to support working with Peril.
+     *
+     * @param {string} path The path fo the file that exists
+     * @param {string} repoSlug An optional reference to the repo's slug: e.g. danger/danger-js
+     * @param {string} ref An optional reference to a branch/sha
+     */
+    fileContents(path: string, repoSlug?: string, ref?: string): Promise<string>
   }
 
   /**
@@ -452,6 +520,10 @@ declare module "danger" {
      * Whether the user is an org, or a user
      */
     type: "User" | "Organization"
+    /**
+     * The url for a users's image
+     */
+    avatar_url: string
   }
 
   /**
@@ -579,7 +651,8 @@ declare module "danger" {
   }
 
   /**
-   * The result of user doing warn, message or fail.
+   * The result of user doing warn, message or fail, built this way for
+   * expansion later.
    */
   interface Violation {
     /**
@@ -588,6 +661,15 @@ declare module "danger" {
      */
     message: string
   }
+  /** A function with a callback function, which Danger wraps in a Promise */
+  type CallbackableFn = (callback: (done: any) => void) => void
+
+  /**
+   * Types of things which Danger will schedule for you, it's recommended that you
+   * just throw in an `async () => { [...] }` function. Can also handle a function
+   * that has a single 'done' arg.
+   */
+  type Scheduleable = Promise<any> | Promise<void> | CallbackableFn
   /**
    * A Dangerfile is evaluated as a script, and so async code does not work
    * out of the box. By using the `schedule` function you can now register a
@@ -597,7 +679,7 @@ declare module "danger" {
    *
    * @param {Function} asyncFunction the function to run asynchronously
    */
-  function schedule(asyncFunction: (p: Promise<any>) => void): void
+  function schedule(asyncFunction: Scheduleable): void
 
   /**
    * Fails a build, outputting a specific reason for failing.
@@ -627,9 +709,6 @@ declare module "danger" {
    * @param {MarkdownString} message the String to output
    */
   function markdown(message: MarkdownString): void
-
-  /** Typical console */
-  const console: Console
 
   /**
    * The root Danger object. This contains all of the metadata you

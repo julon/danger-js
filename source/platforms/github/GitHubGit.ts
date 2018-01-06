@@ -1,5 +1,5 @@
-import { GitDSL, JSONPatchOperation } from "../../dsl/GitDSL"
-import { GitHubCommit } from "../../dsl/GitHubDSL"
+import { GitDSL, JSONPatchOperation, GitJSONDSL } from "../../dsl/GitDSL"
+import { GitHubCommit, GitHubDSL } from "../../dsl/GitHubDSL"
 import { GitCommit } from "../../dsl/Commit"
 
 import { GitHubAPI } from "../github/GitHubAPI"
@@ -34,15 +34,12 @@ function githubCommitToGitCommit(ghCommit: GitHubCommit): GitCommit {
   }
 }
 
-export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
+export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitJSONDSL> {
   // Note: This repetition feels bad, could the GitHub object cache JSON returned
   // from the API?
 
   // We'll need all this info to be able to generate a working GitDSL object
-
-  const pr = await api.getPullRequestInfo()
   const diff = await api.getPullRequestDiff()
-  const getCommits = await api.getPullRequestCommits()
 
   const fileDiffs: any[] = parseDiff(diff)
 
@@ -50,6 +47,18 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
   const removedDiffs = fileDiffs.filter((diff: any) => diff["deleted"])
   const modifiedDiffs = fileDiffs.filter((diff: any) => !includes(addedDiffs, diff) && !includes(removedDiffs, diff))
 
+  const getCommits = await api.getPullRequestCommits()
+  return {
+    modified_files: modifiedDiffs.map(d => d.to),
+    created_files: addedDiffs.map(d => d.to),
+    deleted_files: removedDiffs.map(d => d.from),
+    commits: getCommits.map(githubCommitToGitCommit),
+  }
+}
+
+// TODO: Remove the GitHubAPI
+// This is blocked by https://github.com/octokit/node-github/issues/602
+export const gitJSONToGitDSL = (github: GitHubDSL, json: GitJSONDSL, githubAPI?: GitHubAPI): GitDSL => {
   /**
    * Takes a filename, and pulls from the PR the two versions of a file
    * where we then pass that off to the rfc6902 JSON patch generator.
@@ -57,32 +66,31 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
    * @param filename The path of the file
    */
   const JSONPatchForFile = async (filename: string) => {
+    // debugger
     // We already have access to the diff, so see if the file is in there
     // if it's not return an empty diff
-    const modified = modifiedDiffs.find(diff => diff.to === filename)
-    if (!modified) {
+    if (!json.modified_files.includes(filename)) {
       return null
     }
 
     // Grab the two files contents.
-    const baseFile = await api.fileContents(filename, pr.base.repo.full_name, pr.base.sha)
-    const headFile = await api.fileContents(filename, pr.head.repo.full_name, pr.head.sha)
+    const baseFile = await github.utils.fileContents(filename, github.pr.base.repo.full_name, github.pr.base.sha)
+    const headFile = await github.utils.fileContents(filename, github.pr.head.repo.full_name, github.pr.head.sha)
 
-    if (baseFile && headFile) {
-      // Parse JSON
-      const baseJSON = JSON.parse(baseFile)
-      const headJSON = JSON.parse(headFile)
-      // Tiny bit of hand-waving here around the types. JSONPatchOperation is
-      // a simpler version of all operations inside the rfc6902 d.ts. Users
-      // of danger wont care that much, so I'm smudging the classes slightly
-      // to be ones we can add to the hosted docs.
-      return {
-        before: baseJSON,
-        after: headJSON,
-        diff: jsonDiff.createPatch(baseJSON, headJSON) as JSONPatchOperation[],
-      }
+    // Parse JSON. `fileContents` returns empty string for files that are
+    // missing in one of the refs, ie. when the file is created or deleted.
+    const baseJSON = baseFile === "" ? {} : JSON.parse(baseFile)
+    const headJSON = headFile === "" ? {} : JSON.parse(headFile)
+
+    // Tiny bit of hand-waving here around the types. JSONPatchOperation is
+    // a simpler version of all operations inside the rfc6902 d.ts. Users
+    // of danger wont care that much, so I'm smudging the classes slightly
+    // to be ones we can add to the hosted docs.
+    return {
+      before: baseFile === "" ? null : baseJSON,
+      after: headFile === "" ? null : headJSON,
+      diff: jsonDiff.createPatch(baseJSON, headJSON) as JSONPatchOperation[],
     }
-    return null
   }
 
   /**
@@ -93,6 +101,7 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
    */
   const JSONDiffForFile = async (filename: string) => {
     const patchObject = await JSONPatchForFile(filename)
+
     if (!patchObject) {
       return {}
     }
@@ -108,25 +117,36 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
       const backAStepPath = pathSteps.length <= 2 ? path : pathSteps.slice(0, pathSteps.length - 1).join("/")
 
       const diff: any = {
-        after: jsonpointer.get(after, backAStepPath),
-        before: jsonpointer.get(before, backAStepPath),
+        after: jsonpointer.get(after, backAStepPath) || null,
+        before: jsonpointer.get(before, backAStepPath) || null,
       }
+
+      const emptyValueOfCounterpart = (other: any) => {
+        if (Array.isArray(other)) {
+          return []
+        } else if (isobject(diff.after)) {
+          return {}
+        }
+        return null
+      }
+
+      const beforeValue = diff.before || emptyValueOfCounterpart(diff.after)
+      const afterValue = diff.after || emptyValueOfCounterpart(diff.before)
 
       // If they both are arrays, add some extra metadata about what was
       // added or removed. This makes it really easy to act on specific
       // changes to JSON DSLs
 
-      if (Array.isArray(diff.after) && Array.isArray(diff.before)) {
-        const arrayBefore = diff.before as any[]
-        const arrayAfter = diff.after as any[]
+      if (Array.isArray(afterValue) && Array.isArray(beforeValue)) {
+        const arrayBefore = beforeValue as any[]
+        const arrayAfter = afterValue as any[]
 
         diff.added = arrayAfter.filter(o => !includes(arrayBefore, o))
         diff.removed = arrayBefore.filter(o => !includes(arrayAfter, o))
-
         // Do the same, but for keys inside an object if they both are objects.
-      } else if (isobject(diff.after) && isobject(diff.before)) {
-        const beforeKeys = keys(diff.before) as string[]
-        const afterKeys = keys(diff.after) as string[]
+      } else if (isobject(afterValue) && isobject(beforeValue)) {
+        const beforeKeys = keys(beforeValue) as string[]
+        const afterKeys = keys(afterValue) as string[]
         diff.added = afterKeys.filter(o => !includes(beforeKeys, o))
         diff.removed = beforeKeys.filter(o => !includes(afterKeys, o))
       }
@@ -146,9 +166,21 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
    * @param filename File path for the diff
    */
   const diffForFile = async (filename: string) => {
-    // We already have access to the diff, so see if the file is in there
-    // if it's not return an empty diff
-    const structuredDiff = modifiedDiffs.find((diff: any) => diff.from === filename || diff.to === filename)
+    // TODO: Remove GitHubAPI  by switching entirely to node-github
+    // See https://github.com/octokit/node-github/issues/602
+
+    const ghAPI =
+      githubAPI ||
+      new GitHubAPI(
+        { repoSlug: github.pr.head.repo.full_name, pullRequestID: String(github.pr.number) },
+        process.env["DANGER_GITHUB_API_TOKEN"]
+      )
+
+    const diff = await ghAPI.getPullRequestDiff()
+
+    const fileDiffs: any[] = parseDiff(diff)
+    const structuredDiff = fileDiffs.find((diff: any) => diff.from === filename || diff.to === filename)
+
     if (!structuredDiff) {
       return null
     }
@@ -158,20 +190,30 @@ export default async function gitDSLForGitHub(api: GitHubAPI): Promise<GitDSL> {
       .reduce((a: Changes, b: Changes) => a.concat(b), [])
 
     return {
-      before: await api.fileContents(filename, pr.base.repo.full_name, pr.base.sha),
-      after: await api.fileContents(filename, pr.head.repo.full_name, pr.head.sha),
+      before: await github.utils.fileContents(filename, github.pr.base.repo.full_name, github.pr.base.sha),
+
+      after: await github.utils.fileContents(filename, github.pr.head.repo.full_name, github.pr.head.sha),
+
       diff: allLines.map(getContent).join(os.EOL),
-      added: allLines.filter(byType("add")).map(getContent).join(os.EOL),
-      removed: allLines.filter(byType("del")).map(getContent).join(os.EOL),
+
+      added: allLines
+        .filter(byType("add"))
+        .map(getContent)
+        .join(os.EOL),
+
+      removed: allLines
+        .filter(byType("del"))
+        .map(getContent)
+        .join(os.EOL),
     }
   }
 
   return {
-    modified_files: modifiedDiffs.map(d => d.to),
-    created_files: addedDiffs.map(d => d.to),
-    deleted_files: removedDiffs.map(d => d.from),
+    modified_files: json.modified_files,
+    created_files: json.created_files,
+    deleted_files: json.deleted_files,
+    commits: json.commits,
     diffForFile,
-    commits: getCommits.map(githubCommitToGitCommit),
     JSONPatchForFile,
     JSONDiffForFile,
   }
