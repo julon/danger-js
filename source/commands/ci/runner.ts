@@ -17,6 +17,7 @@ const d = debug("danger:process_runner")
 export interface RunnerConfig {
   source?: CISource
   platform?: Platform
+  additionalArgs?: string[]
 }
 
 export const runRunner = async (app: SharedCLI, config?: RunnerConfig) => {
@@ -43,7 +44,7 @@ export const runRunner = async (app: SharedCLI, config?: RunnerConfig) => {
       const dangerJSONDSL = await jsonDSLGenerator(platform)
 
       const config: ExecutorOptions = {
-        stdoutOnly: app.textOnly,
+        stdoutOnly: !platform.supportsCommenting() || app.textOnly,
         verbose: app.verbose,
         jsonOnly: false,
         dangerID: app.id || "default",
