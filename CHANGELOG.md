@@ -8,6 +8,16 @@
 
 ## Master
 
+\*
+
+### 3.0.3
+
+* Added support for Nevercode.io as a CI Provider - [@fbartho][]
+
+### 3.0.2
+
+* Don't log ENV vars during a run - thanks @samdmarshall. - [@orta][]
+
 ### 3.0.1
 
 * Bug fixes and debug improvements. If you're interested run danger with `DEBUG="*" yarn danger [etc]`
@@ -812,3 +822,4 @@ Not usable for others, only stubs of classes etc. - [@orta][]
 [@joarwilk]: https://github.com/joarwilk
 [@dfalling]: https://github.com/dfalling
 [@caffodian]: https://github.com/caffodian
+[@fbartho]: https://github.com/fbartho
